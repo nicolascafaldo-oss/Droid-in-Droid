@@ -16,3 +16,6 @@
 local.properties
 .env
 debug.keystore
+
+# Rust build artifacts (cargo-ndk / cargo build output)
+native/kestrel_sandbox_rust/target/
