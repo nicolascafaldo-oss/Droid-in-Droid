@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">KestrelVM</string>
+    <string name="nav_viewport">Viewport</string>
+    <string name="nav_files">Files</string>
+    <string name="nav_engine">Hardware</string>
+    <string name="action_enter_pip">System PiP</string>
+    <string name="action_float_overlay">Mini Float</string>
+    <string name="action_import_media">Import Media</string>
+    <string name="action_import_file">Import APK / File</string>
+    <string name="action_export_file">Export</string>
+    <string name="pip_action_toggle_pause">Toggle Pause</string>
+    <string name="pip_action_next_vm">Next VM</string>
+    <string name="cd_pip_button">Shrink active VM to Picture-in-Picture floating window</string>
+    <string name="cd_float_button">Toggle in-app floating mini VM window</string>
+    <string name="cd_guest_back">Guest system back button</string>
+    <string name="cd_guest_home">Guest system home button</string>
+    <string name="cd_guest_recents">Guest system overview button</string>
+</resources>

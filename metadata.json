@@ -1,0 +1,6 @@
+{
+  "name": "KestrelVM",
+  "description": "Android-on-Android virtualization hypervisor with multi-instance VMs, custom resolution/DPI spoofing, Picture-in-Picture floating window, two-way sandbox file transfer, and hardware passthrough telemetry.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
