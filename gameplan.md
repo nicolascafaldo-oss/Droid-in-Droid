@@ -121,7 +121,7 @@ Run `cargo ndk` **from inside `native/kestrel_sandbox_rust`** (note: `cargo-ndk`
   -t arm64-v8a \
   -t armeabi-v7a \
   -t x86_64 \
-  -p 24 \
+  -P 24 \
   -o ../../app/src/main/jniLibs \
   build --release)
 ```
@@ -199,5 +199,6 @@ All three Phase E engineering epics are now integrated into the repository (`Nat
 | `Execution failed for task ':app:validateSigningDebug' ... debug.keystore not found` | Run the `keytool -genkeypair` command from **Section 2A** at the project root. |
 | `SDK location not found` | Export `ANDROID_HOME` or add `sdk.dir=/path/to/Android/Sdk` to an untracked `local.properties`. |
 | `cargo-ndk: error: Could not find NDK` | Export `ANDROID_NDK_HOME` pointing to `$ANDROID_HOME/ndk/<version>`. |
+| `cargo-ndk panicked! ... unknown package: 24` (from `-p 24`) | cargo-ndk ≥ 4.0 repurposed `-p` as cargo's `--package` flag; use `-P 24` (`--platform`) for the Android API level instead. |
 | `UnsatisfiedLinkError` or fallback banner still shown in **Hardware** tab | Verify `adb shell getprop ro.product.cpu.abi` (usually `arm64-v8a`) matches a folder under `app/src/main/jniLibs/<abi>/` containing both `.so` files. |
 | `Vol+ + Vol- + Power` toggles screen instead of exiting fullscreen | Stock unrooted firmware reserves `KEYCODE_POWER` for `PhoneWindowManager`; tap the top-right **Viewport** pill or press System Back. |
