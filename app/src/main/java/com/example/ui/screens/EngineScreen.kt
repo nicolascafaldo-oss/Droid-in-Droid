@@ -1,5 +1,8 @@
 package com.example.ui.screens
 
+import android.net.Uri
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.clickable
@@ -15,18 +18,27 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.rounded.CloudDownload
 import androidx.compose.material.icons.rounded.Code
 import androidx.compose.material.icons.rounded.ExpandLess
 import androidx.compose.material.icons.rounded.ExpandMore
+import androidx.compose.material.icons.rounded.FolderOpen
+import androidx.compose.material.icons.rounded.GraphicEq
+import androidx.compose.material.icons.rounded.Hub
 import androidx.compose.material.icons.rounded.Memory
 import androidx.compose.material.icons.rounded.Sensors
 import androidx.compose.material.icons.rounded.Shield
+import androidx.compose.material.icons.rounded.Storage
+import androidx.compose.material.icons.rounded.VerifiedUser
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.FilterChip
@@ -34,9 +46,12 @@ import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -65,10 +80,24 @@ fun EngineScreen(
         bootloaderUnlocked: Boolean,
         seccompMode: String
     ) -> Unit,
+    onProbeBinderAndPath: (VmInstanceEntity) -> Unit,
+    onPulseAudioHal: (VmInstanceEntity) -> Unit,
+    onVerifyRootfs: (VmInstanceEntity) -> Unit,
+    onImportRootfsArchive: (VmInstanceEntity, Uri) -> Unit,
+    onDownloadRootfsUrl: (VmInstanceEntity, String, String?) -> Unit,
     modifier: Modifier = Modifier
 ) {
     val activeVm = state.activeVm
     var expandedLayer by remember { mutableStateOf<Int?>(null) }
+    var showRootfsDownloadDialog by remember { mutableStateOf(false) }
+
+    val archivePickerLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.OpenDocument()
+    ) { uri ->
+        if (uri != null && activeVm != null) {
+            onImportRootfsArchive(activeVm, uri)
+        }
+    }
 
     Box(modifier = modifier.fillMaxSize()) {
         LazyColumn(
@@ -149,7 +178,6 @@ fun EngineScreen(
                             )
                         }
 
-                        // CPU Core Frequency Strip
                         if (hw.coreFreqMhz.isNotEmpty()) {
                             Row(
                                 modifier = Modifier
@@ -189,8 +217,188 @@ fun EngineScreen(
                 }
             }
 
-            // Per-VM Passthrough & Unlock/Root Controls
             if (activeVm != null) {
+                // Epic 1: Rust Seccomp-BPF Supervisor & Binder IPC Proxy Telemetry
+                item {
+                    val sb = state.sandboxTelemetry
+                    Card(
+                        shape = RoundedCornerShape(14.dp),
+                        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+                        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline)
+                    ) {
+                        Column(
+                            modifier = Modifier.padding(14.dp),
+                            verticalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(8.dp)
+                            ) {
+                                Icon(Icons.Rounded.Hub, contentDescription = null, tint = MaterialTheme.colorScheme.primary)
+                                Text("Seccomp-BPF Supervisor & Binder Proxy", style = MaterialTheme.typography.titleMedium)
+                            }
+                            Text(
+                                text = "State: ${sb.supervisorState} • Arch: ${sb.arch} • BPF: ${sb.bpfInstructions} insns • Native: ${if (sb.nativeSupervisorActive) "Rust ptrace" else "Fallback"}",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.primary
+                            )
+                            Text(
+                                text = "Binder Node: ${sb.binderNode} • Services: ${sb.registeredServices} • TX: ${sb.binderTransactions} • Blocked Escapes: ${sb.blockedHostEscapes}",
+                                fontFamily = JetBrainsMonoFontFamily,
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                            Text(
+                                text = "Syscall Traps: ${sb.syscallTraps} • Path Translations: ${sb.pathTranslations} • Guest ELF Init: ${if (sb.guestInitFound) "Present" else "Awaiting Image"}",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.secondary
+                            )
+                            Button(
+                                onClick = { onProbeBinderAndPath(activeVm) },
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .testTag("probe_binder_jail_button")
+                            ) {
+                                Text("Probe Binder IPC & Path Jail")
+                            }
+                        }
+                    }
+                }
+
+                // Epic 2: ANativeWindow Surface & AAudio HAL Card
+                item {
+                    val hal = state.halTelemetry
+                    Card(
+                        shape = RoundedCornerShape(14.dp),
+                        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+                        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline)
+                    ) {
+                        Column(
+                            modifier = Modifier.padding(14.dp),
+                            verticalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(8.dp)
+                            ) {
+                                Icon(Icons.Rounded.GraphicEq, contentDescription = null, tint = MaterialTheme.colorScheme.secondary)
+                                Text("ANativeWindow Surface & AAudio HAL", style = MaterialTheme.typography.titleMedium)
+                            }
+                            Text(
+                                text = "HWC Surface: ${if (hal.surfaceAttached) "Attached (${hal.surfaceWidth}×${hal.surfaceHeight})" else "Detached (Open EGL GPU app in VM)"} • Frames: ${hal.framesPresented}",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.primary
+                            )
+                            Text(
+                                text = "AAudio Stream: ${if (hal.audioActive) "Active" else "Standby"} • Hardware: ${if (hal.aaudioHardware) "libaaudio.so" else "Ring Buffer"} • ${hal.audioSampleRate}Hz (${hal.audioFramesWritten} frames)",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                            OutlinedButton(
+                                onClick = { onPulseAudioHal(activeVm) },
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .testTag("pulse_aaudio_button")
+                            ) {
+                                Icon(Icons.Rounded.GraphicEq, contentDescription = null, modifier = Modifier.size(16.dp))
+                                Spacer(modifier = Modifier.width(6.dp))
+                                Text("Pulse AAudio HAL (528Hz)")
+                            }
+                        }
+                    }
+                }
+
+                // Epic 3: On-Demand Guest AOSP Rootfs Provisioning Card
+                item {
+                    val rootfs = state.rootfsManifest
+                    val progress = state.rootfsProgress?.takeIf { it.vmId == activeVm.id }
+                    Card(
+                        shape = RoundedCornerShape(14.dp),
+                        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+                        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline)
+                    ) {
+                        Column(
+                            modifier = Modifier.padding(14.dp),
+                            verticalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(8.dp)
+                            ) {
+                                Icon(Icons.Rounded.Storage, contentDescription = null, tint = MaterialTheme.colorScheme.tertiary)
+                                Text("Guest AOSP Rootfs Provisioning", style = MaterialTheme.typography.titleMedium)
+                            }
+                            Text(
+                                text = "Status: ${rootfs.status} (${rootfs.sourceType}) • ${rootfs.fileCount} files (${rootfs.totalBytes / 1024} KB)",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.primary
+                            )
+                            Text(
+                                text = "SHA-256: ${rootfs.sha256.take(16).ifEmpty { "pending" }} • Unlocked: ${rootfs.bootloaderUnlocked} • su: ${rootfs.rootSuInstalled} • ELF /init: ${rootfs.elfInitPresent}",
+                                fontFamily = JetBrainsMonoFontFamily,
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+
+                            if (progress != null) {
+                                LinearProgressIndicator(
+                                    progress = { progress.progress.coerceIn(0f, 1f) },
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .height(6.dp)
+                                )
+                                Text(
+                                    text = "${progress.phase}: ${progress.detail}",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = MaterialTheme.colorScheme.secondary
+                                )
+                            }
+
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.spacedBy(8.dp)
+                            ) {
+                                OutlinedButton(
+                                    onClick = {
+                                        archivePickerLauncher.launch(arrayOf("application/zip", "application/gzip", "application/x-tar", "application/octet-stream", "*/*"))
+                                    },
+                                    enabled = progress == null,
+                                    modifier = Modifier
+                                        .weight(1f)
+                                        .testTag("import_rootfs_archive_button")
+                                ) {
+                                    Icon(Icons.Rounded.FolderOpen, contentDescription = null, modifier = Modifier.size(16.dp))
+                                    Spacer(modifier = Modifier.width(4.dp))
+                                    Text("Import Archive", style = MaterialTheme.typography.labelSmall)
+                                }
+                                OutlinedButton(
+                                    onClick = { showRootfsDownloadDialog = true },
+                                    enabled = progress == null,
+                                    modifier = Modifier
+                                        .weight(1f)
+                                        .testTag("download_rootfs_url_button")
+                                ) {
+                                    Icon(Icons.Rounded.CloudDownload, contentDescription = null, modifier = Modifier.size(16.dp))
+                                    Spacer(modifier = Modifier.width(4.dp))
+                                    Text("HTTPS URL", style = MaterialTheme.typography.labelSmall)
+                                }
+                            }
+                            OutlinedButton(
+                                onClick = { onVerifyRootfs(activeVm) },
+                                enabled = progress == null,
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .testTag("verify_rootfs_button")
+                            ) {
+                                Icon(Icons.Rounded.VerifiedUser, contentDescription = null, modifier = Modifier.size(16.dp))
+                                Spacer(modifier = Modifier.width(6.dp))
+                                Text("Verify Unlocked Rootfs Tree & SHA-256")
+                            }
+                        }
+                    }
+                }
+
+                // Per-VM Passthrough & Unlock/Root Controls
                 item {
                     Card(
                         shape = RoundedCornerShape(14.dp),
@@ -421,6 +629,70 @@ fun EngineScreen(
             }
         }
     }
+
+    if (showRootfsDownloadDialog && activeVm != null) {
+        RootfsDownloadDialog(
+            vm = activeVm,
+            onDismiss = { showRootfsDownloadDialog = false },
+            onDownload = { url, sha ->
+                showRootfsDownloadDialog = false
+                onDownloadRootfsUrl(activeVm, url, sha)
+            }
+        )
+    }
+}
+
+@Composable
+private fun RootfsDownloadDialog(
+    vm: VmInstanceEntity,
+    onDismiss: () -> Unit,
+    onDownload: (url: String, sha256: String?) -> Unit
+) {
+    var urlText by remember { mutableStateOf("") }
+    var shaText by remember { mutableStateOf("") }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Download AOSP Rootfs (${vm.name})") },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                Text(
+                    text = "Enter an HTTPS URL to a stripped AOSP rootfs archive (.tar.gz, .tgz, .zip, or .img). Extracted files are confined inside ${vm.id}/.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                OutlinedTextField(
+                    value = urlText,
+                    onValueChange = { urlText = it },
+                    label = { Text("HTTPS Rootfs Archive URL") },
+                    placeholder = { Text("https://example.org/aosp14-arm64-rootfs.tar.gz") },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth()
+                )
+                OutlinedTextField(
+                    value = shaText,
+                    onValueChange = { shaText = it },
+                    label = { Text("Expected SHA-256 (optional)") },
+                    placeholder = { Text("64-char hex digest") },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth()
+                )
+            }
+        },
+        confirmButton = {
+            Button(
+                onClick = { onDownload(urlText, shaText.takeIf { it.isNotBlank() }) },
+                enabled = urlText.trim().startsWith("https://", ignoreCase = true) ||
+                    urlText.trim().startsWith("http://127.0.0.1") ||
+                    urlText.trim().startsWith("http://10.0.2.2")
+            ) {
+                Text("Download")
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) { Text("Cancel") }
+        }
+    )
 }
 
 @Composable

@@ -298,8 +298,7 @@ fun VirtualGuestDisplay(
                                             guestApps = guestApps,
                                             accent = accent,
                                             resolveHostFile = resolveHostFile,
-                                            onLaunchApp = onLaunchApp,
-                                            onUninstallApp = onUninstallApp
+                                            onLaunchApp = onLaunchApp
                                         )
 
                                         GuestDeviceScreen.Recents -> GuestRecentsOverviewScreen(
@@ -686,8 +685,7 @@ private fun GuestAppDrawerScreen(
     guestApps: List<GuestInstalledAppEntity>,
     accent: Color,
     resolveHostFile: (String) -> File,
-    onLaunchApp: (String) -> Unit,
-    onUninstallApp: (GuestInstalledAppEntity) -> Unit
+    onLaunchApp: (String) -> Unit
 ) {
     var query by remember { mutableStateOf("") }
     val filtered = remember(guestApps, query) {

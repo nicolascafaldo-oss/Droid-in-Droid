@@ -31,6 +31,72 @@ data class CleanRoomLayerSpec(
     val interfaceSnippet: String
 )
 
+data class SandboxTelemetry(
+    val vmId: String = "",
+    val running: Boolean = false,
+    val arch: String = "arm64-v8a",
+    val mode: String = "SECCOMP_BPF + PTRACE",
+    val supervisorState: String = "IDLE",
+    val childPid: Int = -1,
+    val guestInitFound: Boolean = false,
+    val bpfInstructions: Int = 0,
+    val syscallTraps: Long = 0L,
+    val pathTranslations: Long = 0L,
+    val binderNode: String = "/dev/binder_proxy",
+    val binderTransactions: Long = 0L,
+    val blockedHostEscapes: Long = 0L,
+    val registeredServices: Int = 8,
+    val lastTrace: String = "",
+    val nativeSupervisorActive: Boolean = false
+)
+
+data class BinderTransactionResult(
+    val status: Int,
+    val handle: Int,
+    val isolatedNode: String,
+    val response: String,
+    val nativeBacked: Boolean
+)
+
+data class HalTelemetry(
+    val surfaceAttached: Boolean = false,
+    val surfaceWidth: Int = 0,
+    val surfaceHeight: Int = 0,
+    val framesPresented: Long = 0L,
+    val lastBlitUs: Long = 0L,
+    val audioActive: Boolean = false,
+    val aaudioHardware: Boolean = false,
+    val audioSampleRate: Int = 48000,
+    val audioFramesWritten: Long = 0L,
+    val displayWidth: Int = 1080,
+    val displayHeight: Int = 2340,
+    val displayHz: Int = 120,
+    val nativeHalActive: Boolean = false
+)
+
+data class RootfsManifest(
+    val vmId: String = "",
+    val status: String = "UNPROVISIONED",
+    val sourceType: String = "BOOTSTRAP_BASE",
+    val guestOsVersion: String = "",
+    val apiLevel: Int = 34,
+    val abi: String = "arm64-v8a",
+    val sha256: String = "",
+    val fileCount: Int = 0,
+    val totalBytes: Long = 0L,
+    val elfInitPresent: Boolean = false,
+    val bootloaderUnlocked: Boolean = true,
+    val rootSuInstalled: Boolean = true,
+    val verifiedAtEpochMs: Long = 0L
+)
+
+data class RootfsProvisionProgress(
+    val vmId: String,
+    val phase: String,
+    val progress: Float,
+    val detail: String
+)
+
 object HypervisorCatalog {
     val displayPresets = listOf(
         DisplayProfilePreset(
@@ -91,75 +157,66 @@ object HypervisorCatalog {
         CleanRoomLayerSpec(
             layerNumber = 1,
             title = "Syscall & Binder Sandbox Engine",
-            languages = "Rust (nix, libc, ndk)",
+            languages = "Rust (nix, libc, android_logger)",
             artifactName = "libkestrel_sandbox.so",
             summary = "Unprivileged userspace container engine intercepting guest Linux syscalls via seccomp-bpf + ptrace and isolating Binder IPC.",
             responsibilities = listOf(
-                "seccomp-bpf filter traps openat/faccessat/statx for rootfs path translation",
+                "seccomp-bpf filter checks AUDIT_ARCH & traps openat/faccessat/execve/ioctl",
+                "ptrace supervisor inspects NT_PRSTATUS registers across arm64, armv7 & x86_64",
                 "Userspace Binder proxy isolates guest servicemanager from host /dev/binder",
-                "PID/UID/GID namespace emulation without requiring root or CLONE_NEWPID",
-                "Memory-safe parcel register decoding across guest/host boundary"
+                "Canonical path jail blocks '..' directory escapes and host Binder access"
             ),
             interfaceSnippet = """
                 // Rust (libkestrel_sandbox.so) JNI Entry Contract
                 #[no_mangle]
-                pub extern "system" fn Java_com_example_engine_NativeBridge_bootContainer(
+                pub extern "system" fn Java_com_example_engine_NativeEngineBridge_nativeBootSandbox(
                     mut env: JNIEnv,
                     _cls: JClass,
                     vm_id: JString,
                     rootfs_dir: JString,
                     seccomp_mode: jint,
-                ) -> jint {
-                    // 1. Install PR_SET_NO_NEW_PRIVS + seccomp-bpf syscall trap
-                    // 2. Spawn guest /init under ptrace path-translation supervisor
-                    // 3. Bind unix domain socket for userspace /dev/binder_proxy
-                    0
-                }
+                ) -> jint
             """.trimIndent()
         ),
         CleanRoomLayerSpec(
             layerNumber = 2,
             title = "Guest ROM & Virtual HAL Layer",
             languages = "C++17 & AOSP Java",
-            artifactName = "hwcomposer.kestrel.so / gralloc.kestrel.so",
+            artifactName = "libkestrel_hal.so (ANativeWindow + AAudio)",
             summary = "Virtualizes AOSP HIDL/AIDL HALs so guest SurfaceFlinger, SensorService, and AudioFlinger stream buffers directly to the host bridge.",
             responsibilities = listOf(
-                "hwcomposer + gralloc allocate AHardwareBuffer / ANativeWindow frames",
-                "Patched WindowManagerService honors dynamic spoofed WxH, DPI, and Hz",
-                "sensors.kestrel.so forwards host IMU packets over lockless ring buffer",
-                "Strips host-only daemons (vold, netd, RIL) inside guest init.rc"
+                "ANativeWindow_fromSurface locks RGBA_8888 buffers directly onto Kotlin SurfaceView",
+                "AAudio low-latency stream dynamically loaded via libaaudio.so on Android 8+",
+                "Dynamic spoofed display profiles push WxH, DPI, and Hz into native HWC state",
+                "Sensor HAL ingests host accelerometer & gyroscope IMU frames under mutex lock"
             ),
             interfaceSnippet = """
-                // C++ Virtual HAL (hwcomposer.kestrel.so)
-                class KestrelComposerClient : public BnComposerClient {
-                public:
-                    ndk::ScopedAStatus setSpoofedDisplayConfig(
-                        int64_t displayId, int32_t widthPx, int32_t heightPx,
-                        int32_t dpi, int32_t refreshHz) override;
-                    ndk::ScopedAStatus presentDisplay(
-                        int64_t displayId,
-                        ndk::ScopedFileDescriptor* outFence) override;
-                };
+                // C++ Virtual HAL (libkestrel_hal.so)
+                JNIEXPORT jint JNICALL
+                Java_com_example_engine_NativeEngineBridge_nativeAttachSurface(
+                    JNIEnv* env, jclass, jstring vm_id, jobject surface);
+                JNIEXPORT jint JNICALL
+                Java_com_example_engine_NativeEngineBridge_nativeBlitGuestFrame(
+                    JNIEnv* env, jclass, jstring vm_id, jint frame_index, jint accent_rgb);
             """.trimIndent()
         ),
         CleanRoomLayerSpec(
             layerNumber = 3,
-            title = "Host Hypervisor & Hardware Bridge",
+            title = "Host Hypervisor & Rootfs Provisioner",
             languages = "Kotlin + Jetpack Compose",
             artifactName = "KestrelVM Host APK",
-            summary = "Runs in-process display compositing, System Picture-in-Picture floating windows, SAF two-way file vault, and live sensor passthrough.",
+            summary = "Manages on-demand AOSP rootfs extraction/verification, System Picture-in-Picture, SAF two-way file vault, and live sensor passthrough.",
             responsibilities = listOf(
+                "ZipSlip/TarSlip-safe extraction (.zip, .tar, .tar.gz) & SHA-256 verification",
                 "System PiP (PictureInPictureParams) + in-app draggable mini viewport",
                 "Zero-permission SAF & Photo Picker two-way file transfer into VM rootfs",
-                "Real SensorManager IMU, CPU core, RAM, and Choreographer frame bridge",
                 "Room-backed multi-instance lifecycle, snapshots, and DPI testbed"
             ),
             interfaceSnippet = """
-                // Kotlin Host JNI & Hardware Bridge Contract
-                object HostHardwareBridge {
-                    fun pushDisplayProfile(vmId: String, width: Int, height: Int, dpi: Int, hz: Int)
-                    fun pushSensorFrame(vmId: String, ax: Float, ay: Float, az: Float, gx: Float, gy: Float, gz: Float)
-                    fun syncSandboxPath(vmId: String, virtualPath: String, hostFile: File)
+                // Kotlin Host JNI & Rootfs Provisioning Contract
+                object NativeEngineBridge {
+                    fun attachSurface(vmId: String, surface: Surface): Int
+                    fun transactBinder(vmId: String, service: String, code: Int, payload: String)
                 }
             """.trimIndent()
         )

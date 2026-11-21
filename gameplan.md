@@ -8,9 +8,9 @@ This guide walks you through running **KestrelVM** on your physical Android phon
 
 | Layer | Path | Current State |
 | :--- | :--- | :--- |
-| **Host App (Kotlin / Compose)** | `app/src/main/java/com/example/` | **Ready.** Launch-to-Choose/Load VM flow, full-screen OEM launcher boot, PiP floating mode, two-way APK/file import-export, live CPU/RAM/Battery/`EGL14`/`GLES20`/IMU telemetry, and **Hardware** diagnostic console. |
-| **Rust Sandbox Engine** | `native/kestrel_sandbox_rust/` | **Source ready (`kestrel_sandbox` v0.1.0).** Needs `cargo-ndk` build on your machine to emit `libkestrel_sandbox.so`. Until `.so` files are packaged, `NativeEngineBridge` runs its Kotlin userspace fallback cleanly. |
-| **C++17 Virtual HAL** | `native/kestrel_hal_cpp/` | **Source ready (`kestrel_hal` v0.1.0).** Needs Android NDK + CMake `3.22.1+` build on your machine to emit `libkestrel_hal.so` linked against `EGL`, `GLESv2`, `android`, and `log`. |
+| **Host App (Kotlin / Compose)** | `app/src/main/java/com/example/` | **Ready.** Launch-to-Choose/Load VM flow, full-screen OEM launcher boot, PiP floating mode, two-way APK/file import-export, live hardware telemetry, and **on-demand AOSP rootfs provisioner**. |
+| **Rust Sandbox Engine** | `native/kestrel_sandbox_rust/` | **Source ready (`kestrel_sandbox` v0.2.0).** Multi-arch `seccomp-bpf` filter (`aarch64`/`arm`/`x86_64`), `ptrace` supervisor, `android_logger`, and isolated userspace Binder IPC router. Recompile locally with `cargo-ndk` to activate v0.2 symbols (old v0.1 `.so` falls back safely). |
+| **C++17 Virtual HAL** | `native/kestrel_hal_cpp/` | **Source ready (`kestrel_hal` v0.2.0).** 16 KB page-aligned `ANativeWindow_fromSurface` framebuffer bridge, `GLESv2`/`EGL`, and dynamically loaded `libaaudio.so` low-latency ring buffer (compiles cleanly on NDK API 24+). |
 
 ---
 
@@ -18,9 +18,10 @@ This guide walks you through running **KestrelVM** on your physical Android phon
 
 Install the following tools on your workstation (Linux, macOS, or Windows/WSL2):
 
-1. **Java Development Kit (JDK) 17 or 21**
+1. **Java Development Kit (JDK) 17 or 21 (Full JDK with `javac`)**
    - Required by Android Gradle Plugin `9.1.1` and Gradle `9.3.1` (`sourceCompatibility` / `targetCompatibility` is Java 11).
-   - Verify: `java -version`
+   - Ensure a full JDK (e.g., Eclipse Temurin 21) is selected rather than a JRE-only install (`javac -version` must succeed). You can pin it outside the repo in `~/.gradle/gradle.properties` via `org.gradle.java.home=/path/to/jdk-21`.
+   - Verify: `java -version && javac -version`
 2. **Android SDK & Platform Tools (`adb`)**
    - Via Android Studio **SDK Manager** (or `sdkmanager`):
      - **Android SDK Platform 36** (`compileSdk` 36 minor 1 / `targetSdk` 36)
@@ -96,7 +97,7 @@ adb shell am start -n com.example/.MainActivity
   - CPU core count, live frequencies (`/sys/devices/system/cpu/...`), RAM, Battery temp
   - Live Accelerometer + Gyroscope `SensorManager` feed when tilting the phone
 - **Picture-in-Picture & Controls:**
-  - Tap the **Viewport** pill in the top-right corner of the fullscreen VM (or tap Back) to return to the compact `42.dp` hypervisor bar + Viewport / Files / Hardware tabs.
+  - Tap the **Viewport** pill in the top-right corner of the fullscreen VM (or tap Back) to return to the compact `42.dp` hypervisor bar with the top **Viewport / Files / Hardware** tabs (clear of both the virtual and physical nav bars).
   - Note on `Vol Up + Vol Down + Power`: Android SystemUI on many unrooted stock ROMs intercepts `KEYCODE_POWER` before apps see it. Use the top-right **Viewport** pill on touchscreens, or test the 3-key chord with a physical/external keyboard or custom-ROM key passthrough.
 - **Two-Way File Transfer (`Files` tab):** Import an `.apk` or media file via Android Photo Picker / Document Picker and verify it appears inside the guest `/sdcard/Download` or installs to `/data/app`.
 
@@ -114,16 +115,15 @@ echo "Using NDK: $ANDROID_NDK_HOME"
 ```
 
 ### Step 2: Build the Rust Sandbox Engine (`libkestrel_sandbox.so`)
-From the repository root:
+Run `cargo ndk` **from inside `native/kestrel_sandbox_rust`** (note: `cargo-ndk` ignores `--manifest-path` when invoking `cargo metadata`), outputting into `app/src/main/jniLibs` (already `p_align=0x4000` / 16 KB aligned on 64-bit targets; `native/kestrel_sandbox_rust/target/` is gitignored):
 ```bash
-cargo ndk \
-  --manifest-path native/kestrel_sandbox_rust/Cargo.toml \
+(cd native/kestrel_sandbox_rust && cargo ndk \
   -t arm64-v8a \
   -t armeabi-v7a \
   -t x86_64 \
   -p 24 \
-  -o app/src/main/jniLibs \
-  build --release
+  -o ../../app/src/main/jniLibs \
+  build --release)
 ```
 Expected outputs:
 - `app/src/main/jniLibs/arm64-v8a/libkestrel_sandbox.so`
@@ -131,7 +131,7 @@ Expected outputs:
 - `app/src/main/jniLibs/x86_64/libkestrel_sandbox.so`
 
 ### Step 3: Build the C++17 Virtual HAL (`libkestrel_hal.so`)
-Build each ABI with the NDK CMake toolchain (no edits to `app/build.gradle.kts` needed):
+Build each ABI with the NDK CMake toolchain (no edits to `app/build.gradle.kts` needed; `CMakeLists.txt` includes `-Wl,-z,max-page-size=16384` for 16 KB ELF `LOAD` segment alignment):
 ```bash
 CMAKE_BIN="$(ls -d "$ANDROID_HOME"/cmake/*/bin/cmake | sort -V | tail -n 1)"
 TOOLCHAIN="$ANDROID_NDK_HOME/build/cmake/android.toolchain.cmake"
@@ -142,6 +142,7 @@ for ABI in arm64-v8a armeabi-v7a x86_64; do
     -DCMAKE_TOOLCHAIN_FILE="$TOOLCHAIN" \
     -DANDROID_ABI="$ABI" \
     -DANDROID_PLATFORM=android-24 \
+    -DANDROID_SUPPORT_FLEXIBLE_PAGE_SIZES=ON \
     -DCMAKE_BUILD_TYPE=Release
   "$CMAKE_BIN" --build "$BUILD_DIR" --config Release
   mkdir -p "app/src/main/jniLibs/$ABI"
@@ -156,7 +157,7 @@ adb logcat -s KestrelVirtualHAL:* AndroidRuntime:E
 ```
 Open **KestrelVM -> Boot a VM -> Exit to Viewport -> Hardware tab** and check **JNI Bridge**:
 - **Before native build:** `Kotlin Userspace Fallback (Rust JNI ready) | Kotlin HAL Bridge + GLES20 Surface (C++ JNI ready)`
-- **After native build (Success):** `kestrel_sandbox-rs/0.1.0 (seccomp-bpf + binder-proxy) | kestrel_hal-cpp17/0.1.0 (hwcomposer + gralloc + sensors)`
+- **After native build (Success):** `kestrel_sandbox-rs/0.2.0 (seccomp-bpf+ptrace+binder/aarch64) | kestrel_hal-cpp17/0.2.0 (ANativeWindow+GLES20+AAudio)`
 
 ---
 
@@ -175,19 +176,19 @@ Before pushing back to Git and pulling into AI Studio, verify these rules so the
 
 ---
 
-## 6. Next Engineering Milestones (True Out-of-Process AOSP Guest Execution)
+## 6. Phase E Engine Features (Implemented — Rebuild `.so` Locally to Activate Native Paths)
 
-Once Phase 1 & Phase 2 are verified on your physical phone, the next stage of **KestrelVM** is replacing the host-rendered AOSP shell with true out-of-process guest Linux/Android execution:
+All three Phase E engineering epics are now integrated into the repository (`NativeEngineBridge` automatically guards every new v0.2 JNI call with `UnsatisfiedLinkError` fallback until you run the two commands in **Section 4**):
 
-1. **Rust Syscall & Seccomp Supervisor (`native/kestrel_sandbox_rust/src/lib.rs`):**
-   - Fork child `init` process inside `filesDir/kestrel_vms/<id>/rootfs`.
-   - Attach `nix::sys::ptrace` + `SECCOMP_RET_TRACE` / `PR_SET_NO_NEW_PRIVS` to rewrite guest `openat`, `faccessat`, `execve`, and `bind`/`connect` paths without requiring host root.
-   - Multiplex guest `/dev/binder` `ioctl(BINDER_WRITE_READ)` parcels in userspace so guest `servicemanager` and `system_server` stay isolated from the host OS.
-2. **C++ Surface & Audio Hal Bridge (`native/kestrel_hal_cpp/kestrel_virtual_hal.cpp`):**
-   - Expose `nativeAttachSurface(vmId, Surface)` -> `ANativeWindow_fromSurface()` so the guest `hwcomposer`/`gralloc` shared-memory framebuffer blits directly into the Kotlin `SurfaceView` / Picture-in-Picture window at hardware refresh rate.
-   - Add `AAudio` low-latency ring buffer + virtual V4L2/Camera2 frame producer over Unix domain sockets.
-3. **Guest AOSP Rootfs Provisioning:**
-   - Download or sideload stripped, virtualized AOSP `system` rootfs images (`Android 8.1`, `11`, `13`, `14`) with `ro.boot.flash.locked=0` and `/system/xbin/su` into `filesDir/kestrel_vms/` on demand rather than bundling multi-hundred-MB ROMs inside the base APK.
+1. **Rust Syscall, Seccomp-BPF & Binder Supervisor (`native/kestrel_sandbox_rust/src/`):**
+   - `seccomp.rs`: Multi-arch classic BPF filter (`AUDIT_ARCH` validation + `SECCOMP_RET_TRACE` for `openat`, `faccessat`, `execve`, `readlinkat`, `mkdirat`, `unlinkat`, `renameat*`, `ioctl`, `connect`, `bind`).
+   - `supervisor.rs`: `fork` + `ptrace` + `PR_SET_SECCOMP` launcher & `PTRACE_GETREGSET(NT_PRSTATUS)` cross-arch register inspector whenever an ELF guest `/init` is present on disk, plus canonical `/dev/binder` path isolation.
+   - `binder_proxy.rs`: Per-VM isolated `servicemanager` router (`/dev/binder_proxy/<vmId>`) that blocks direct host `/dev/binder` escapes.
+2. **C++ Surface & AAudio HAL Bridge (`native/kestrel_hal_cpp/kestrel_virtual_hal.cpp`):**
+   - `nativeAttachSurface` / `nativeBlitGuestFrame` (`ANativeWindow_fromSurface` -> RGBA_8888 lock/unlockAndPost into the guest **EGL GPU** `SurfaceView`).
+   - Runtime-loaded `libaaudio.so` low-latency PCM stream (`nativeStartAudioStream` / `nativePlayAudioPulse`) compatible with `-DANDROID_PLATFORM=android-24`.
+3. **Guest AOSP Rootfs Provisioning (`app/src/main/java/com/example/data/rootfs/RootfsProvisioner.kt`):**
+   - Import `.zip`, `.tar`, `.tar.gz`, or `.img` rootfs bundles via SAF Document Picker or HTTPS URL (with optional SHA-256 verification and ZipSlip/TarSlip traversal guards) directly from the **Hardware** tab.
 
 ---
 

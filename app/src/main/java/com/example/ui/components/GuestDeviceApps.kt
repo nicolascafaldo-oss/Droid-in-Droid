@@ -3,6 +3,8 @@ package com.example.ui.components
 import android.opengl.GLES20
 import android.opengl.GLSurfaceView
 import android.opengl.Matrix
+import android.view.SurfaceHolder
+import android.view.SurfaceView
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
@@ -34,6 +36,7 @@ import androidx.compose.material.icons.rounded.Folder
 import androidx.compose.material.icons.rounded.Settings
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.FilterChip
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.LinearProgressIndicator
@@ -45,6 +48,7 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
@@ -61,6 +65,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.style.TextOverflow
@@ -72,6 +77,7 @@ import com.example.data.local.GuestInstalledAppEntity
 import com.example.data.local.VmInstanceEntity
 import com.example.data.local.VmSandboxFileEntity
 import com.example.engine.HypervisorCatalog
+import com.example.engine.NativeEngineBridge
 import com.example.engine.SyscallLogEntry
 import com.example.hardware.HostHardwareSnapshot
 import com.example.hardware.HostSensorSample
@@ -467,7 +473,7 @@ fun GuestTerminalApp(
         history.add("$promptPrefix $trimmed")
         when {
             trimmed == "clear" -> history.clear()
-            trimmed == "help" -> history.add("Commands: id | su | uname -a | getprop | wm size | wm density | pm list packages | ls | free | ps | trace | clear")
+            trimmed == "help" -> history.add("Commands: id | su | uname -a | getprop | binder ping | binder list | binder escape | realpath <p> | seccomp | aaudio | service list | wm size | pm list packages | ls | free | ps | trace | clear")
             trimmed == "id" -> {
                 if (vm.rootEnabled) {
                     history.add("uid=0(root) gid=0(root) groups=0(root) context=u:r:kestrel_su:s0")
@@ -481,6 +487,32 @@ fun GuestTerminalApp(
                 } else {
                     history.add("su: Permission denied (enable Root in Hardware tab)")
                 }
+            }
+            trimmed == "binder ping" -> {
+                val res = NativeEngineBridge.transactBinder(vm.id, "servicemanager", 1, "")
+                history.add("[${res.isolatedNode}] ${res.response}")
+            }
+            trimmed == "binder list" || trimmed == "service list" -> {
+                val res = NativeEngineBridge.transactBinder(vm.id, "servicemanager", 4, "")
+                history.add("Isolated services (${res.isolatedNode}): ${res.response}")
+            }
+            trimmed == "binder escape" -> {
+                val res = NativeEngineBridge.transactBinder(vm.id, "/dev/binder", 1, "")
+                history.add(res.response)
+            }
+            trimmed.startsWith("realpath ") -> {
+                val arg = trimmed.removePrefix("realpath").trim()
+                val mapped = NativeEngineBridge.translateGuestPath(vm.id, arg)
+                history.add("$arg -> $mapped")
+            }
+            trimmed == "seccomp" -> {
+                val st = NativeEngineBridge.getSandboxTelemetry(vm.id)
+                history.add("arch=${st.arch} mode=${st.mode} state=${st.supervisorState} bpf=${st.bpfInstructions}insns traps=${st.syscallTraps} rewrites=${st.pathTranslations}")
+            }
+            trimmed == "aaudio" -> {
+                val frames = NativeEngineBridge.playAudioPulse(vm.id, 528, 90)
+                val hal = NativeEngineBridge.getHalTelemetry(vm.id)
+                history.add("AAudio write($frames frames) rate=${hal.audioSampleRate}Hz hw=${hal.aaudioHardware}")
             }
             trimmed.startsWith("uname") -> history.add("Linux kestrel-guest 6.1.0 ${vm.abi} ${vm.guestOsVersion}")
             trimmed == "wm size" -> history.add("Physical size: ${vm.widthPx}x${vm.heightPx} @ ${vm.refreshRateHz}Hz")
@@ -504,9 +536,10 @@ fun GuestTerminalApp(
                 history.add("Mem: ${vm.allocatedRamMb}M total, ${hostHardware.availableRamMb}M host_avail")
             }
             trimmed == "ps" -> {
-                history.add("PID 1    /init (seccomp-bpf)")
-                history.add("PID 42   /system/bin/servicemanager (/dev/binder_proxy)")
-                history.add("PID 88   /system/bin/surfaceflinger (hwcomposer.kestrel)")
+                val st = NativeEngineBridge.getSandboxTelemetry(vm.id)
+                history.add("PID 1    /init (${st.supervisorState}, bpf=${st.bpfInstructions}insns)")
+                history.add("PID 42   /system/bin/servicemanager (${st.binderNode})")
+                history.add("PID 88   /system/bin/surfaceflinger (ANativeWindow + GLES20)")
                 history.add("PID 124  system_server (${vm.allocatedCores} vCPUs)")
             }
             trimmed == "trace" -> {
@@ -535,7 +568,11 @@ fun GuestTerminalApp(
                     text = line,
                     fontFamily = JetBrainsMonoFontFamily,
                     fontSize = 10.sp,
-                    color = if (line.startsWith("kestrel_sh@")) MaterialTheme.colorScheme.secondary else MaterialTheme.colorScheme.onSurface
+                    color = if (line.startsWith("root@") || line.startsWith("shell@")) {
+                        MaterialTheme.colorScheme.secondary
+                    } else {
+                        MaterialTheme.colorScheme.onSurface
+                    }
                 )
             }
         }
@@ -727,6 +764,28 @@ fun GuestEglSurfaceApp(
     vm: VmInstanceEntity,
     accent: Color
 ) {
+    var useNativeWindow by remember(vm.id) { mutableStateOf(false) }
+    var surfaceAttached by remember(vm.id) { mutableStateOf(false) }
+    var blitFrames by remember(vm.id) { mutableIntStateOf(0) }
+    var aaudioStatus by remember(vm.id) { mutableStateOf("Idle") }
+    val accentRgb = accent.toArgb() and 0x00FFFFFF
+
+    LaunchedEffect(useNativeWindow, surfaceAttached, vm.id) {
+        if (useNativeWindow && surfaceAttached) {
+            while (true) {
+                NativeEngineBridge.blitGuestFrame(vm.id, blitFrames, accentRgb)
+                blitFrames++
+                delay(33L)
+            }
+        }
+    }
+
+    DisposableEffect(vm.id) {
+        onDispose {
+            NativeEngineBridge.detachSurface(vm.id)
+        }
+    }
+
     Column(
         modifier = Modifier
             .fillMaxSize()
@@ -734,19 +793,45 @@ fun GuestEglSurfaceApp(
         verticalArrangement = Arrangement.spacedBy(8.dp)
     ) {
         Text(
-            text = "EGL / GLES20 Surface Bridge",
+            text = "EGL & ANativeWindow Surface Bridge",
             style = MaterialTheme.typography.titleSmall,
             color = accent
         )
         Text(
             text = if (vm.eglBridgeEnabled) {
-                "Hardware OpenGL ES 2.0 Surface active (${vm.widthPx}×${vm.heightPx} @ ${vm.refreshRateHz}Hz)"
+                "${vm.widthPx}×${vm.heightPx} @ ${vm.refreshRateHz}Hz • Mode: ${if (useNativeWindow) "C++ ANativeWindow ($blitFrames frames)" else "GLES20 Hardware"}"
             } else {
-                "EGL Hardware Bridge disabled in Engine tab — software fallback"
+                "EGL Hardware Bridge disabled in Hardware tab — software fallback"
             },
             style = MaterialTheme.typography.labelSmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant
         )
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(6.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            FilterChip(
+                selected = !useNativeWindow,
+                onClick = { useNativeWindow = false },
+                label = { Text("GLES20 Prism", style = MaterialTheme.typography.labelSmall) }
+            )
+            FilterChip(
+                selected = useNativeWindow,
+                onClick = { useNativeWindow = true },
+                label = { Text("ANativeWindow", style = MaterialTheme.typography.labelSmall) }
+            )
+            OutlinedButton(
+                onClick = {
+                    val frames = NativeEngineBridge.playAudioPulse(vm.id, freqHz = 528, durationMs = 95)
+                    val hal = NativeEngineBridge.getHalTelemetry(vm.id)
+                    aaudioStatus = "${frames}f@${hal.audioSampleRate}"
+                },
+                contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp)
+            ) {
+                Text("AAudio: $aaudioStatus", style = MaterialTheme.typography.labelSmall)
+            }
+        }
         Box(
             modifier = Modifier
                 .weight(1f)
@@ -754,16 +839,42 @@ fun GuestEglSurfaceApp(
                 .clip(RoundedCornerShape(12.dp))
                 .border(1.dp, accent.copy(alpha = 0.4f), RoundedCornerShape(12.dp))
         ) {
-            AndroidView(
-                factory = { ctx ->
-                    GLSurfaceView(ctx).apply {
-                        setEGLContextClientVersion(2)
-                        setRenderer(KestrelPrismGlRenderer())
-                        renderMode = GLSurfaceView.RENDERMODE_CONTINUOUSLY
-                    }
-                },
-                modifier = Modifier.fillMaxSize()
-            )
+            if (useNativeWindow) {
+                AndroidView(
+                    factory = { ctx ->
+                        SurfaceView(ctx).apply {
+                            holder.addCallback(object : SurfaceHolder.Callback {
+                                override fun surfaceCreated(holder: SurfaceHolder) {
+                                    NativeEngineBridge.attachSurface(vm.id, holder.surface)
+                                    surfaceAttached = true
+                                }
+
+                                override fun surfaceChanged(holder: SurfaceHolder, format: Int, width: Int, height: Int) {
+                                    NativeEngineBridge.attachSurface(vm.id, holder.surface)
+                                    surfaceAttached = true
+                                }
+
+                                override fun surfaceDestroyed(holder: SurfaceHolder) {
+                                    surfaceAttached = false
+                                    NativeEngineBridge.detachSurface(vm.id)
+                                }
+                            })
+                        }
+                    },
+                    modifier = Modifier.fillMaxSize()
+                )
+            } else {
+                AndroidView(
+                    factory = { ctx ->
+                        GLSurfaceView(ctx).apply {
+                            setEGLContextClientVersion(2)
+                            setRenderer(KestrelPrismGlRenderer())
+                            renderMode = GLSurfaceView.RENDERMODE_CONTINUOUSLY
+                        }
+                    },
+                    modifier = Modifier.fillMaxSize()
+                )
+            }
         }
     }
 }

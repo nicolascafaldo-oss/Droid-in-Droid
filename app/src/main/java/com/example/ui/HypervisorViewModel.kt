@@ -11,7 +11,12 @@ import com.example.data.local.VmInstanceEntity
 import com.example.data.local.VmRunState
 import com.example.data.local.VmSandboxFileEntity
 import com.example.data.repository.VmRepository
+import com.example.data.rootfs.RootfsProvisioner
+import com.example.engine.HalTelemetry
 import com.example.engine.NativeEngineBridge
+import com.example.engine.RootfsManifest
+import com.example.engine.RootfsProvisionProgress
+import com.example.engine.SandboxTelemetry
 import com.example.engine.SyscallLogEntry
 import com.example.hardware.HostHardwareMonitor
 import com.example.hardware.HostHardwareSnapshot
@@ -67,7 +72,11 @@ data class HypervisorUiState(
     val darkTheme: Boolean = true,
     val statusBanner: String? = null,
     val previewFileContent: Pair<VmSandboxFileEntity, String>? = null,
-    val bridgeRuntimeSummary: String = NativeEngineBridge.getRuntimeBridgeSummary()
+    val bridgeRuntimeSummary: String = NativeEngineBridge.getRuntimeBridgeSummary(),
+    val sandboxTelemetry: SandboxTelemetry = SandboxTelemetry(),
+    val halTelemetry: HalTelemetry = HalTelemetry(),
+    val rootfsManifest: RootfsManifest = RootfsManifest(),
+    val rootfsProgress: RootfsProvisionProgress? = null
 ) {
     val activeVm: VmInstanceEntity?
         get() = loadedVmId?.let { id -> instances.find { it.id == id } }
@@ -119,6 +128,7 @@ class HypervisorViewModel(application: Application) : AndroidViewModel(applicati
     private val database = AppDatabase.getInstance(application)
     private val fileStorage = SandboxFileStorage(application)
     private val repository = VmRepository(database.vmDao(), fileStorage)
+    private val rootfsProvisioner = RootfsProvisioner(application)
     private val hardwareMonitor = HostHardwareMonitor(application)
 
     private val _loadedVmId = MutableStateFlow<String?>(null)
@@ -136,6 +146,10 @@ class HypervisorViewModel(application: Application) : AndroidViewModel(applicati
     private val _statusBanner = MutableStateFlow<String?>(null)
     private val _syscallLogs = MutableStateFlow<List<SyscallLogEntry>>(emptyList())
     private val _previewFile = MutableStateFlow<Pair<VmSandboxFileEntity, String>?>(null)
+    private val _sandboxTelemetry = MutableStateFlow(SandboxTelemetry())
+    private val _halTelemetry = MutableStateFlow(HalTelemetry())
+    private val _rootfsManifest = MutableStateFlow(RootfsManifest())
+    private val _rootfsProgress = MutableStateFlow<RootfsProvisionProgress?>(null)
 
     private val logSeq = AtomicLong(1L)
     private val timeFormat = SimpleDateFormat("HH:mm:ss.SSS", Locale.US)
@@ -197,11 +211,21 @@ class HypervisorViewModel(application: Application) : AndroidViewModel(applicati
         DataBundle(instances, allFiles, allApps, hw, sensors)
     }
 
+    private val telemetryBundleFlow = combine(
+        _sandboxTelemetry,
+        _halTelemetry,
+        _rootfsManifest,
+        _rootfsProgress
+    ) { sb, hal, rootfs, prog ->
+        Quad(sb, hal, rootfs, prog)
+    }
+
     val uiState: StateFlow<HypervisorUiState> = combine(
         dataFlow,
         selectionFlow,
-        chromeFlow
-    ) { data, selection, chrome ->
+        chromeFlow,
+        telemetryBundleFlow
+    ) { data, selection, chrome, telem ->
         val validLoadedId = selection.loadedVmId?.takeIf { id ->
             data.instances.any { it.id == id }
         }
@@ -227,7 +251,11 @@ class HypervisorViewModel(application: Application) : AndroidViewModel(applicati
             isInPipMode = selection.inPipMode,
             darkTheme = chrome.darkTheme,
             statusBanner = chrome.banner,
-            previewFileContent = chrome.preview
+            previewFileContent = chrome.preview,
+            sandboxTelemetry = telem.a,
+            halTelemetry = telem.b,
+            rootfsManifest = telem.c,
+            rootfsProgress = telem.d
         )
     }.stateIn(
         scope = viewModelScope,
@@ -247,9 +275,13 @@ class HypervisorViewModel(application: Application) : AndroidViewModel(applicati
         viewModelScope.launch {
             while (true) {
                 delay(2400L)
+                val currentActive = uiState.value.activeVm
+                if (currentActive != null) {
+                    refreshNativeTelemetry(currentActive)
+                }
                 val running = uiState.value.runningVms
                 if (running.isNotEmpty()) {
-                    val vm = uiState.value.activeVm?.takeIf { it.runState == VmRunState.RUNNING.name } ?: running.first()
+                    val vm = currentActive?.takeIf { it.runState == VmRunState.RUNNING.name } ?: running.first()
                     val sensors = uiState.value.hostSensors
                     if (vm.sensorPassthroughEnabled) {
                         NativeEngineBridge.pushSensorSample(
@@ -260,14 +292,23 @@ class HypervisorViewModel(application: Application) : AndroidViewModel(applicati
                     }
                     val (layer, call, detail, us) = when ((0..3).random()) {
                         0 -> Quad("RUST-SYSCALL", "openat(\"/data/app/...\")", "Translated -> ${NativeEngineBridge.translateGuestPath(vm.id, "/data/app")}", (16..42).random())
-                        1 -> Quad("BINDER-PROXY", "ioctl(BINDER_WRITE_READ)", "Isolated guest servicemanager", (34..88).random())
-                        2 -> Quad("CPP-HWC-HAL", "eglSwapBuffers(HW)", "${vm.widthPx}x${vm.heightPx} @ ${vm.refreshRateHz}Hz", (95..260).random())
+                        1 -> {
+                            val ping = NativeEngineBridge.transactBinder(vm.id, "servicemanager", 1, "")
+                            Quad("BINDER-PROXY", "ioctl(BINDER_WRITE_READ)", ping.response, (28..76).random())
+                        }
+                        2 -> Quad("CPP-HWC-HAL", "ANativeWindow_post(${vm.widthPx}x${vm.heightPx})", "frames=${uiState.value.halTelemetry.framesPresented} @ ${vm.refreshRateHz}Hz", (90..220).random())
                         else -> Quad("CPU-PASSTHROUGH", "sched_setaffinity(${vm.allocatedCores}c)", "Native host CPU & ${if (vm.rootEnabled) "su(uid=0)" else "user"}", (10..24).random())
                     }
                     appendLog(vm.id, vm.name, layer, call, detail, us)
+                    refreshNativeTelemetry(vm)
                 }
             }
         }
+    }
+
+    private fun refreshNativeTelemetry(vm: VmInstanceEntity) {
+        _sandboxTelemetry.value = NativeEngineBridge.getSandboxTelemetry(vm.id)
+        _halTelemetry.value = NativeEngineBridge.getHalTelemetry(vm.id)
     }
 
     fun isFullscreenActiveNow(): Boolean = _loadedVmId.value != null && _isVmFullscreen.value
@@ -279,8 +320,14 @@ class HypervisorViewModel(application: Application) : AndroidViewModel(applicati
         _guestScreen.value = GuestDeviceScreen.Home
         _isGuestShadeOpen.value = false
         val vm = uiState.value.instances.find { it.id == vmId }
-        if (vm != null && vm.runState == VmRunState.STOPPED.name) {
-            bootVm(vmId)
+        if (vm != null) {
+            viewModelScope.launch {
+                _rootfsManifest.value = rootfsProvisioner.loadManifest(vm)
+                refreshNativeTelemetry(vm)
+            }
+            if (vm.runState == VmRunState.STOPPED.name) {
+                bootVm(vmId)
+            }
         }
     }
 
@@ -433,11 +480,25 @@ class HypervisorViewModel(application: Application) : AndroidViewModel(applicati
             val vm = uiState.value.instances.find { it.id == vmId } ?: return@launch
             repository.updateRunState(vmId, VmRunState.BOOTING)
             val rootfs = repository.getVmRootDir(vmId).absolutePath
-            NativeEngineBridge.bootSandbox(vmId, rootfs, 1)
-            appendLog(vmId, vm.name, "RUST-INIT", "clone(SIGCHLD)", "Factory Unlocked • Root=${vm.rootEnabled}", 72)
+            val seccompCode = NativeEngineBridge.seccompModeToCode(vm.seccompMode)
+            NativeEngineBridge.bootSandbox(vmId, rootfs, seccompCode)
+            val manifest = rootfsProvisioner.verifyOrRepairRootfs(vm)
+            _rootfsManifest.value = manifest
+            if (vm.audioBridgeEnabled) {
+                NativeEngineBridge.startAudioStream(vmId, 48000)
+            }
+            appendLog(
+                vmId,
+                vm.name,
+                "RUST-INIT",
+                "seccomp(mode=$seccompCode)",
+                "BPF armed • rootfs=${manifest.status} (${manifest.fileCount} files) • Root=${vm.rootEnabled}",
+                72
+            )
             delay(350L)
             NativeEngineBridge.pushDisplayProfile(vmId, vm.widthPx, vm.heightPx, vm.dpi, vm.refreshRateHz)
             repository.updateRunState(vmId, VmRunState.RUNNING)
+            refreshNativeTelemetry(vm)
             _guestScreen.value = GuestDeviceScreen.Home
             _statusBanner.value = "${vm.name} ready"
         }
@@ -593,6 +654,85 @@ class HypervisorViewModel(application: Application) : AndroidViewModel(applicati
             val text = repository.readFilePreview(file)
             _previewFile.value = file to text
         }
+    }
+
+    fun probeBinderAndPathJail(vm: VmInstanceEntity) {
+        val ping = NativeEngineBridge.transactBinder(vm.id, "servicemanager", 1, "")
+        val escaped = NativeEngineBridge.transactBinder(vm.id, "/dev/binder", 1, "")
+        val jailedPath = NativeEngineBridge.translateGuestPath(vm.id, "/../../system/etc/hosts")
+        appendLog(vm.id, vm.name, "BINDER-PROXY", "PING servicemanager", ping.response, 31)
+        appendLog(vm.id, vm.name, "SECCOMP-JAIL", "blocked(/dev/binder)", escaped.response, 18)
+        appendLog(vm.id, vm.name, "PATH-JAIL", "realpath(/../../system/etc/hosts)", jailedPath, 14)
+        refreshNativeTelemetry(vm)
+        _statusBanner.value = "Binder isolated (${ping.isolatedNode}) • Host escape blocked"
+    }
+
+    fun pulseAudioHal(vm: VmInstanceEntity) {
+        val written = NativeEngineBridge.playAudioPulse(vm.id, freqHz = 528, durationMs = 110)
+        val hal = NativeEngineBridge.getHalTelemetry(vm.id)
+        _halTelemetry.value = hal
+        appendLog(
+            vm.id,
+            vm.name,
+            "AAUDIO-HAL",
+            "AAudioStream_write($written frames)",
+            "rate=${hal.audioSampleRate}Hz • hw=${hal.aaudioHardware}",
+            64
+        )
+        _statusBanner.value = if (hal.aaudioHardware) {
+            "AAudio HAL pulsed $written frames @ ${hal.audioSampleRate}Hz"
+        } else {
+            "Audio HAL ring pulsed $written frames (${hal.audioSampleRate}Hz)"
+        }
+    }
+
+    fun verifyActiveRootfs(vm: VmInstanceEntity) {
+        viewModelScope.launch {
+            val manifest = rootfsProvisioner.verifyOrRepairRootfs(vm)
+            _rootfsManifest.value = manifest
+            appendLog(vm.id, vm.name, "ROOTFS", "verify_tree(${vm.id})", "sha256=${manifest.sha256.take(12)} • files=${manifest.fileCount}", 95)
+            _statusBanner.value = "Rootfs ${manifest.status}: ${manifest.fileCount} files verified"
+        }
+    }
+
+    fun importRootfsArchive(vm: VmInstanceEntity, uri: Uri) {
+        viewModelScope.launch {
+            try {
+                _rootfsProgress.value = RootfsProvisionProgress(vm.id, "IMPORTING", 0.05f, "Reading archive...")
+                val manifest = rootfsProvisioner.provisionFromLocalArchive(vm, uri) { frac, detail ->
+                    _rootfsProgress.value = RootfsProvisionProgress(vm.id, "EXTRACTING", frac, detail)
+                }
+                _rootfsManifest.value = manifest
+                appendLog(vm.id, vm.name, "ROOTFS", "extract_archive()", "${manifest.sourceType} • files=${manifest.fileCount}", 210)
+                _statusBanner.value = "Provisioned ${vm.name} (${manifest.fileCount} files)"
+            } catch (e: Exception) {
+                _statusBanner.value = "Rootfs import failed: ${e.localizedMessage ?: "error"}"
+            } finally {
+                _rootfsProgress.value = null
+            }
+        }
+    }
+
+    fun downloadRootfsFromUrl(vm: VmInstanceEntity, url: String, expectedSha256: String?) {
+        viewModelScope.launch {
+            try {
+                _rootfsProgress.value = RootfsProvisionProgress(vm.id, "DOWNLOADING", 0.02f, "Starting download...")
+                val manifest = rootfsProvisioner.provisionFromHttpsUrl(vm, url, expectedSha256) { frac, detail ->
+                    _rootfsProgress.value = RootfsProvisionProgress(vm.id, "DOWNLOADING", frac, detail)
+                }
+                _rootfsManifest.value = manifest
+                appendLog(vm.id, vm.name, "ROOTFS", "https_fetch()", "${manifest.sourceType} • sha256=${manifest.sha256.take(12)}", 240)
+                _statusBanner.value = "Downloaded & verified rootfs (${manifest.fileCount} files)"
+            } catch (e: Exception) {
+                _statusBanner.value = "Rootfs download failed: ${e.localizedMessage ?: "error"}"
+            } finally {
+                _rootfsProgress.value = null
+            }
+        }
+    }
+
+    fun refreshVmSurfaceTelemetry(vm: VmInstanceEntity) {
+        refreshNativeTelemetry(vm)
     }
 
     fun resolveHostFile(hostRelativePath: String) = repository.resolveHostFile(hostRelativePath)

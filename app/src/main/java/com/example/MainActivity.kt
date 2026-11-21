@@ -28,10 +28,12 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.displayCutout
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.navigationBars
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.safeDrawing
@@ -48,18 +50,19 @@ import androidx.compose.material.icons.rounded.FolderCopy
 import androidx.compose.material.icons.rounded.FullscreenExit
 import androidx.compose.material.icons.rounded.LightMode
 import androidx.compose.material.icons.rounded.Smartphone
+import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.NavigationBar
-import androidx.compose.material3.NavigationBarItem
 import androidx.compose.material3.NavigationRail
 import androidx.compose.material3.NavigationRailItem
+import androidx.compose.material3.PrimaryTabRow
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Surface
+import androidx.compose.material3.Tab
 import androidx.compose.material3.Text
 import androidx.compose.material3.minimumInteractiveComponentSize
 import androidx.compose.runtime.Composable
@@ -406,7 +409,8 @@ private fun FullscreenGuestVmContainer(
             border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline.copy(alpha = 0.6f)),
             modifier = Modifier
                 .align(Alignment.TopEnd)
-                .padding(top = 30.dp, end = 8.dp)
+                .windowInsetsPadding(WindowInsets.displayCutout)
+                .padding(top = 12.dp, end = 8.dp)
                 .clickable { viewModel.exitVmFullscreen() }
                 .testTag("exit_fullscreen_button")
         ) {
@@ -459,16 +463,21 @@ private fun PipRemoteActionReceiver(
     }
 }
 
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun CompactHypervisorTopBar(
     title: String,
     showBack: Boolean,
     darkTheme: Boolean,
+    workspaceTabs: List<WorkspaceTabItem>,
+    selectedTab: VmWorkspaceTab,
+    showTopWorkspaceTabs: Boolean,
+    onSelectTab: (VmWorkspaceTab) -> Unit,
     onBack: () -> Unit,
     onToggleTheme: () -> Unit
 ) {
     Surface(
-        color = MaterialTheme.colorScheme.background
+        color = MaterialTheme.colorScheme.surface
     ) {
         Column(
             modifier = Modifier
@@ -524,7 +533,48 @@ private fun CompactHypervisorTopBar(
                     )
                 }
             }
-            HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+
+            if (showTopWorkspaceTabs) {
+                val selectedIndex = workspaceTabs
+                    .indexOfFirst { it.tab == selectedTab }
+                    .coerceAtLeast(0)
+                PrimaryTabRow(
+                    selectedTabIndex = selectedIndex,
+                    containerColor = MaterialTheme.colorScheme.surface,
+                    contentColor = MaterialTheme.colorScheme.primary
+                ) {
+                    workspaceTabs.forEachIndexed { index, item ->
+                        val isSelected = selectedIndex == index
+                        Tab(
+                            selected = isSelected,
+                            onClick = { onSelectTab(item.tab) },
+                            modifier = Modifier
+                                .heightIn(min = 48.dp)
+                                .testTag(item.testTag)
+                        ) {
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(6.dp),
+                                modifier = Modifier.padding(horizontal = 8.dp, vertical = 10.dp)
+                            ) {
+                                Icon(
+                                    imageVector = item.icon,
+                                    contentDescription = null,
+                                    modifier = Modifier.size(17.dp)
+                                )
+                                Text(
+                                    text = stringResource(item.labelRes),
+                                    style = MaterialTheme.typography.labelMedium,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
+                                )
+                            }
+                        }
+                    }
+                }
+            } else {
+                HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+            }
         }
     }
 }
@@ -577,34 +627,13 @@ private fun KestrelHypervisorShell(
                     title = activeVm?.name ?: stringResource(R.string.app_name),
                     showBack = activeVm != null,
                     darkTheme = state.darkTheme,
+                    workspaceTabs = workspaceTabs,
+                    selectedTab = state.activeWorkspaceTab,
+                    showTopWorkspaceTabs = activeVm != null && !useNavRail,
+                    onSelectTab = { viewModel.selectWorkspaceTab(it) },
                     onBack = { viewModel.returnToVmChooser() },
                     onToggleTheme = { viewModel.toggleTheme() }
                 )
-            },
-            bottomBar = {
-                if (activeVm != null && !useNavRail) {
-                    NavigationBar(
-                        containerColor = MaterialTheme.colorScheme.surface,
-                        windowInsets = WindowInsets.navigationBars,
-                        modifier = Modifier.height(58.dp)
-                    ) {
-                        workspaceTabs.forEach { item ->
-                            NavigationBarItem(
-                                selected = state.activeWorkspaceTab == item.tab,
-                                onClick = { viewModel.selectWorkspaceTab(item.tab) },
-                                icon = {
-                                    Icon(
-                                        imageVector = item.icon,
-                                        contentDescription = stringResource(item.labelRes),
-                                        modifier = Modifier.size(20.dp)
-                                    )
-                                },
-                                label = { Text(stringResource(item.labelRes), style = MaterialTheme.typography.labelSmall) },
-                                modifier = Modifier.testTag(item.testTag)
-                            )
-                        }
-                    }
-                }
             }
         ) { innerPadding ->
             Box(
@@ -627,9 +656,7 @@ private fun KestrelHypervisorShell(
                         if (useNavRail) {
                             NavigationRail(
                                 containerColor = MaterialTheme.colorScheme.surface,
-                                modifier = Modifier
-                                    .fillMaxHeight()
-                                    .windowInsetsPadding(WindowInsets.navigationBars)
+                                modifier = Modifier.fillMaxHeight()
                             ) {
                                 workspaceTabs.forEach { item ->
                                     NavigationRailItem(
@@ -702,7 +729,12 @@ private fun KestrelHypervisorShell(
                                             bootloaderUnlocked = unlocked,
                                             seccompMode = seccomp
                                         )
-                                    }
+                                    },
+                                    onProbeBinderAndPath = { viewModel.probeBinderAndPathJail(it) },
+                                    onPulseAudioHal = { viewModel.pulseAudioHal(it) },
+                                    onVerifyRootfs = { viewModel.verifyActiveRootfs(it) },
+                                    onImportRootfsArchive = { vm, uri -> viewModel.importRootfsArchive(vm, uri) },
+                                    onDownloadRootfsUrl = { vm, url, sha -> viewModel.downloadRootfsFromUrl(vm, url, sha) }
                                 )
                             }
                         }

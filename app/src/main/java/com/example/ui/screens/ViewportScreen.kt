@@ -122,12 +122,18 @@ fun ViewportScreen(
                     horizontalAlignment = Alignment.CenterHorizontally,
                     verticalArrangement = Arrangement.spacedBy(10.dp)
                 ) {
-                    Box(
+                    BoxWithConstraints(
                         modifier = Modifier
                             .weight(1f)
                             .fillMaxWidth(),
                         contentAlignment = Alignment.Center
                     ) {
+                        val rawRatio = (activeVm.widthPx.toFloat() / activeVm.heightPx.toFloat()).coerceIn(0.42f, 2.38f)
+                        val fitModifier = if (maxWidth > 0.dp && maxHeight > 0.dp && (maxWidth / maxHeight) > rawRatio) {
+                            Modifier.fillMaxHeight()
+                        } else {
+                            Modifier.fillMaxWidth()
+                        }
                         VirtualGuestDisplay(
                             vm = activeVm,
                             guestScreen = state.guestScreen,
@@ -161,7 +167,7 @@ fun ViewportScreen(
                             onUninstallApp = onUninstallApp,
                             onSaveNote = { title, body -> onSaveNote(activeVm.id, title, body) },
                             onOpenHostVault = onOpenHostVault,
-                            modifier = Modifier.fillMaxHeight()
+                            modifier = fitModifier
                         )
                     }
                 }
@@ -215,12 +221,18 @@ fun ViewportScreen(
                     showSpooferButton = true
                 )
 
-                Box(
+                BoxWithConstraints(
                     modifier = Modifier
                         .weight(1f)
                         .fillMaxWidth(),
                     contentAlignment = Alignment.Center
                 ) {
+                    val rawRatio = (activeVm.widthPx.toFloat() / activeVm.heightPx.toFloat()).coerceIn(0.42f, 2.38f)
+                    val fitModifier = if (maxWidth > 0.dp && maxHeight > 0.dp && (maxWidth / maxHeight) > rawRatio) {
+                        Modifier.fillMaxHeight()
+                    } else {
+                        Modifier.fillMaxWidth()
+                    }
                     VirtualGuestDisplay(
                         vm = activeVm,
                         guestScreen = state.guestScreen,
@@ -254,7 +266,7 @@ fun ViewportScreen(
                         onUninstallApp = onUninstallApp,
                         onSaveNote = { title, body -> onSaveNote(activeVm.id, title, body) },
                         onOpenHostVault = onOpenHostVault,
-                        modifier = Modifier.fillMaxHeight()
+                        modifier = fitModifier
                     )
                 }
             }
