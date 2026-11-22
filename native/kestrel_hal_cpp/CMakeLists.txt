@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.22.1)
-project(kestrel_hal LANGUAGES CXX)
+project(kestrel_hal LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -26,3 +26,12 @@ target_link_libraries(kestrel_hal
 target_link_options(kestrel_hal PRIVATE
     "-Wl,-z,max-page-size=16384"
 )
+
+# --- Phase 1 bootstrap launcher -------------------------------------------------
+# Emitted as libkestrel_init.so so PackageManager extracts it into
+# nativeLibraryDir with an executable SELinux label (filesDir is noexec).
+add_executable(kestrel_init kestrel_init.c)
+set_target_properties(kestrel_init PROPERTIES OUTPUT_NAME "kestrel_init" PREFIX "lib" SUFFIX ".so")
+target_compile_options(kestrel_init PRIVATE -fPIE)
+target_link_options(kestrel_init PRIVATE -pie "-Wl,-z,max-page-size=16384")
+target_link_libraries(kestrel_init ${log-lib})

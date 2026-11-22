@@ -65,6 +65,7 @@ pub extern "system" fn Java_com_example_engine_NativeEngineBridge_nativeBootSand
     _cls: JClass,
     vm_id: JString,
     rootfs_dir: JString,
+    native_lib_dir: JString,
     seccomp_mode: jint,
 ) -> jint {
     ensure_logger_init();
@@ -74,6 +75,9 @@ pub extern "system" fn Java_com_example_engine_NativeEngineBridge_nativeBootSand
     let Ok(rootfs_str) = env.get_string(&rootfs_dir).map(|s| s.to_string_lossy().into_owned()) else {
         return -2;
     };
+    let Ok(native_lib_str) = env.get_string(&native_lib_dir).map(|s| s.to_string_lossy().into_owned()) else {
+        return -3;
+    };
 
     if let Ok(mut guard) = table().lock() {
         if let Some(existing) = guard.get_mut(&vm_id_str) {
@@ -81,7 +85,7 @@ pub extern "system" fn Java_com_example_engine_NativeEngineBridge_nativeBootSand
                 old_sup.stop();
             }
         }
-        let sup = spawn_supervisor(&vm_id_str, &rootfs_str, seccomp_mode);
+        let sup = spawn_supervisor(&vm_id_str, &rootfs_str, &native_lib_str, seccomp_mode);
         let binder = BinderRouter::new(&vm_id_str);
         info!(
             "Sandbox booted vm={} mode={} bpf_insns={} init_elf={}",

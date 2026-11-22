@@ -481,7 +481,9 @@ class HypervisorViewModel(application: Application) : AndroidViewModel(applicati
             repository.updateRunState(vmId, VmRunState.BOOTING)
             val rootfs = repository.getVmRootDir(vmId).absolutePath
             val seccompCode = NativeEngineBridge.seccompModeToCode(vm.seccompMode)
-            NativeEngineBridge.bootSandbox(vmId, rootfs, seccompCode)
+            // Platform type: null under Robolectric (or when no native libs are extracted); "" = unknown, native side falls back to rootfs search
+            val nativeLibDir = getApplication<Application>().applicationInfo.nativeLibraryDir ?: ""
+            NativeEngineBridge.bootSandbox(vmId, rootfs, seccompCode, nativeLibDir)
             val manifest = rootfsProvisioner.verifyOrRepairRootfs(vm)
             _rootfsManifest.value = manifest
             if (vm.audioBridgeEnabled) {

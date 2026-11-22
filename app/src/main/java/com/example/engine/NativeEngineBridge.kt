@@ -90,7 +90,19 @@ object NativeEngineBridge {
         else -> 1
     }
 
-    fun bootSandbox(vmId: String, rootfsDir: String, seccompMode: Int): Int {
+    /**
+     * Boots a sandbox VM.
+     *
+     * @param nativeLibDir the host's `applicationInfo.nativeLibraryDir`, from which the native
+     * side locates `libkestrel_init.so`; empty string means "unknown, let the native side fall
+     * back to the rootfs search".
+     */
+    fun bootSandbox(
+        vmId: String,
+        rootfsDir: String,
+        seccompMode: Int,
+        nativeLibDir: String = "",
+    ): Int {
         fallbackSandboxes[vmId] = FallbackSandboxState(
             vmId = vmId,
             rootfsDir = rootfsDir,
@@ -99,7 +111,7 @@ object NativeEngineBridge {
         )
         return if (isRustSandboxLoaded) {
             try {
-                nativeBootSandbox(vmId, rootfsDir, seccompMode)
+                nativeBootSandbox(vmId, rootfsDir, nativeLibDir, seccompMode)
             } catch (_: UnsatisfiedLinkError) {
                 0
             }
@@ -444,7 +456,12 @@ object NativeEngineBridge {
     private external fun nativeGetBridgeVersion(): String
 
     @JvmStatic
-    private external fun nativeBootSandbox(vmId: String, rootfsDir: String, seccompMode: Int): Int
+    private external fun nativeBootSandbox(
+        vmId: String,
+        rootfsDir: String,
+        nativeLibDir: String,
+        seccompMode: Int,
+    ): Int
 
     @JvmStatic
     private external fun nativeStopSandbox(vmId: String): Int

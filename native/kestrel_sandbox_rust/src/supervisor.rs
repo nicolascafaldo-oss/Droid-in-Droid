@@ -114,11 +114,14 @@ fn is_valid_elf_binary(path: &Path) -> bool {
     file.read_exact(&mut magic).is_ok() && magic == ELF_MAGIC
 }
 
-fn find_guest_init(rootfs_dir: &str) -> Option<String> {
-    let candidates = [
-        format!("{}/system/bin/kestrel_init", rootfs_dir.trim_end_matches('/')),
-        format!("{}/init", rootfs_dir.trim_end_matches('/')),
-    ];
+fn find_guest_init(rootfs_dir: &str, native_lib_dir: &str) -> Option<String> {
+    let mut candidates: Vec<String> = Vec::new();
+    let lib = native_lib_dir.trim_end_matches('/');
+    if !lib.is_empty() {
+        candidates.push(format!("{}/libkestrel_init.so", lib));
+    }
+    candidates.push(format!("{}/system/bin/kestrel_init", rootfs_dir.trim_end_matches('/')));
+    candidates.push(format!("{}/init", rootfs_dir.trim_end_matches('/')));
     candidates
         .into_iter()
         .find(|p| is_valid_elf_binary(Path::new(p)))
@@ -205,11 +208,19 @@ fn read_syscall_regs(_pid: Pid) -> Option<SyscallRegs> {
 }
 
 /// Launches the ptrace + seccomp-bpf container supervisor for `vm_id`.
-/// When a guest ELF `/init` exists inside `rootfs_dir`, forks and ptraces it in a
-/// background supervisor thread; otherwise arms the BPF policy and stands by for provisioning.
-pub fn spawn_supervisor(vm_id: &str, rootfs_dir: &str, seccomp_mode: i32) -> SupervisorHandle {
+/// Probes for the guest launcher ELF in candidate order: the packaged
+/// `libkestrel_init.so` inside `native_lib_dir` first, then
+/// `system/bin/kestrel_init` and `/init` inside `rootfs_dir`. When one exists,
+/// forks and ptraces it in a background supervisor thread; otherwise arms the
+/// BPF policy and stands by for provisioning.
+pub fn spawn_supervisor(
+    vm_id: &str,
+    rootfs_dir: &str,
+    native_lib_dir: &str,
+    seccomp_mode: i32,
+) -> SupervisorHandle {
     let bpf_len = seccomp::build_filter(seccomp_mode).len();
-    let guest_init = find_guest_init(rootfs_dir);
+    let guest_init = find_guest_init(rootfs_dir, native_lib_dir);
 
     let Some(init_path) = guest_init else {
         let shared = Arc::new(SupervisorShared::new("ARMED_AWAITING_INIT"));
@@ -235,6 +246,24 @@ pub fn spawn_supervisor(vm_id: &str, rootfs_dir: &str, seccomp_mode: i32) -> Sup
     let Ok(c_prog) = CString::new(init_path.clone()) else {
         return SupervisorHandle {
             shared: Arc::new(SupervisorShared::new("INVALID_INIT_PATH")),
+            bpf_instructions: bpf_len,
+            guest_init_found: false,
+            worker: None,
+        };
+    };
+    // Built before fork(): the child passes these straight to execve(), so the
+    // CString buffers must outlive the fork unchanged.
+    let Ok(c_rootfs) = CString::new(rootfs_dir) else {
+        return SupervisorHandle {
+            shared: Arc::new(SupervisorShared::new("INVALID_ROOTFS_PATH")),
+            bpf_instructions: bpf_len,
+            guest_init_found: false,
+            worker: None,
+        };
+    };
+    let Ok(c_vm_id) = CString::new(vm_id) else {
+        return SupervisorHandle {
+            shared: Arc::new(SupervisorShared::new("INVALID_VM_ID")),
             bpf_instructions: bpf_len,
             guest_init_found: false,
             worker: None,
@@ -279,7 +308,12 @@ pub fn spawn_supervisor(vm_id: &str, rootfs_dir: &str, seccomp_mode: i32) -> Sup
                         libc::_exit(121);
                     }
                     libc::raise(libc::SIGSTOP);
-                    let argv = [c_prog.as_ptr(), std::ptr::null()];
+                    let argv = [
+                        c_prog.as_ptr(),
+                        c_rootfs.as_ptr(),
+                        c_vm_id.as_ptr(),
+                        std::ptr::null(),
+                    ];
                     let envp = [std::ptr::null()];
                     libc::execve(c_prog.as_ptr(), argv.as_ptr(), envp.as_ptr());
                     libc::_exit(127);
