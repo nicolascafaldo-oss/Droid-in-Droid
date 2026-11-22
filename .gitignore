@@ -19,3 +19,6 @@ debug.keystore
 
 # Rust build artifacts (cargo-ndk / cargo build output)
 native/kestrel_sandbox_rust/target/
+
+# CMake / C++ build output (native/kestrel_hal_cpp)
+native/kestrel_hal_cpp/build/
